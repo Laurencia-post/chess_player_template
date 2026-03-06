@@ -1,107 +1,42 @@
-import chess
-import random
-import re
 import torch
+import chess
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from chess_tournament import Player
 from typing import Optional
-from transformers import AutoTokenizer, AutoModelForCausalLM
-
-from chess_tournament.players import Player
-
 
 class TransformerPlayer(Player):
-    """
-    Tiny LM baseline chess player.
-
-    REQUIRED:
-        Subclasses chess_tournament.players.Player
-    """
-
-    UCI_REGEX = re.compile(r"\b([a-h][1-8][a-h][1-8][qrbn]?)\b", re.IGNORECASE)
-
-    def __init__(
-        self,
-        name: str = "TinyLMPlayer",
-        model_id: str = "HuggingFaceTB/SmolLM2-135M-Instruct",
-        temperature: float = 0.7,
-        max_new_tokens: int = 8,
-    ):
+    def __init__(self, name: str = "Laurencia"):
         super().__init__(name)
-
-        self.model_id = model_id
-        self.temperature = temperature
-        self.max_new_tokens = max_new_tokens
-
+       # check GPU or Cpu
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # use gpt2 to test
+        self.model_id = "gpt2" 
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+        self.model = AutoModelForCausalLM.from_pretrained(self.model_id).to(self.device)
+        self.model.eval()
 
-        # Lazy-loaded components
-        self.tokenizer = None
-        self.model = None
-
-    # -------------------------
-    # Lazy loading
-    # -------------------------
-    def _load_model(self):
-        if self.model is None:
-            print(f"[{self.name}] Loading {self.model_id} on {self.device}...")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-
-            self.model = AutoModelForCausalLM.from_pretrained(self.model_id)
-            self.model.to(self.device)
-            self.model.eval()
-
-    # -------------------------
-    # Prompt
-    # -------------------------
-    def _build_prompt(self, fen: str) -> str:
-        return f"FEN: {fen}\nMove:"
-
-    def _extract_move(self, text: str) -> Optional[str]:
-        match = self.UCI_REGEX.search(text)
-        return match.group(1).lower() if match else None
-
-    def _random_legal(self, fen: str) -> Optional[str]:
-        board = chess.Board(fen)
-        moves = list(board.legal_moves)
-        return random.choice(moves).uci() if moves else None
-
-    # -------------------------
-    # Main API
-    # -------------------------
     def get_move(self, fen: str) -> Optional[str]:
-
-        try:
-            self._load_model()
-        except Exception:
-            return self._random_legal(fen)
-
-        prompt = self._build_prompt(fen)
-
-        try:
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=self.max_new_tokens,
-                    do_sample=True,
-                    temperature=self.temperature,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                )
-
-            decoded = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-            if decoded.startswith(prompt):
-                decoded = decoded[len(prompt):]
-
-            move = self._extract_move(decoded)
-
-            if move:
-                return move
-
-        except Exception:
-            pass
-
-        return self._random_legal(fen)
+        # read current chessboard state
+        board = chess.Board(fen)
+        legal_moves = list(board.legal_moves)
+        # if already been killed and have no legal steps left, return None
+        if not legal_moves:
+            return None
+        best_move = None
+        best_score = -float('inf')
+        
+        # tell model what the current chessboard looks like
+        prompt = f"Chess board position in FEN: {fen}\nThe best next move is "
+        # let gpt2 rate each legal move and select
+        with torch.no_grad():
+            for move in legal_moves:
+                move_uci = move.uci()
+                text = f"{prompt}{move_uci}"
+                inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+                outputs = self.model(**inputs, labels=inputs["input_ids"])
+                score = -outputs.loss.item() # the smaller the loss, the better; adding negative sign means the higher the score, the better
+                if score > best_score:
+                    best_score = score
+                    best_move = move_uci
+                    
+        return best_move
