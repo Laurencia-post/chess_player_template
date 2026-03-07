@@ -9,8 +9,8 @@ class TransformerPlayer(Player):
         super().__init__(name)
        # check GPU or Cpu
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # use gpt2 to test
-        self.model_id = "gpt2" 
+        # use model to test
+        self.model_id = "Qwen/Qwen2.5-0.5B"
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
         self.model = AutoModelForCausalLM.from_pretrained(self.model_id).to(self.device)
         self.model.eval()
@@ -26,8 +26,13 @@ class TransformerPlayer(Player):
         best_score = -float('inf')
         
         # tell model what the current chessboard looks like
-        prompt = f"Chess board position in FEN: {fen}\nThe best next move is "
-        # let gpt2 rate each legal move and select
+        prompt = (
+    "You are a Grandmaster chess engine. "
+    f"Analyze this board position in FEN: {fen}\n"
+    "What is the single best and winning UCI move? "
+    "The best move is: "
+)
+        # let model rate each legal move and select
         with torch.no_grad():
             for move in legal_moves:
                 move_uci = move.uci()
