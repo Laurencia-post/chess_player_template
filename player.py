@@ -7,7 +7,7 @@ from chess_tournament import Player
 from typing import Optional
 
 class TransformerPlayer(Player):
-    def __init__(self, name: str = "Laurencia_GodMode"):
+    def __init__(self, name: str = "Laurencia_Ultra"):
         super().__init__(name)
         # check GPU or CPU
         self.device = "cuda" if torch.cuda.is_available() else "cpu"  
@@ -30,7 +30,7 @@ class TransformerPlayer(Player):
     def get_move(self, fen: str) -> Optional[str]:
         start_time = time.time()
         
-        # First layer of defense, prevent receiving damaged FEN strings from causing a crash
+        # First layer of defense
         try:
             board = chess.Board(fen)
             legal_moves = list(board.legal_moves)   
@@ -40,7 +40,7 @@ class TransformerPlayer(Player):
         if not legal_moves:
             return None
             
-        # wrap the core logic in try-except to prevent runtime crashes
+        # wrap the core logic in try-except
         try:
             # Filter 1: win immediately if possible
             for move in legal_moves:
@@ -50,23 +50,29 @@ class TransformerPlayer(Player):
                 if is_mate:
                     return move.uci()
                     
-            # Filter 2: avoid attacked squares, BAD trades, STALEMATE, and OPPONENT MATE
+            # Filter 2: avoid moving into attacked squares, avoid BAD trades, and avoid STALEMATE
             opponent_color = not board.turn
             safe_moves = []
             for move in legal_moves:
                 board.push(move)
                 is_stalemate = board.is_stalemate()
                 
-                # Opponent Mate Sniffer
-                # If I make this move, can opponent checkmate me immediately on the next turn?
-                opp_can_mate = any(board.is_checkmate() for opp_move in board.legal_moves)
+                # 【优化1修复】：正确的 Opponent Mate Sniffer 逻辑
+                opp_can_mate = False
+                for opp_move in board.legal_moves:
+                    board.push(opp_move)
+                    if board.is_checkmate():
+                        opp_can_mate = True
+                        board.pop()
+                        break
+                    board.pop()
                 
                 board.pop()
                 
-                # avoid Stalemate and avoid giving the opponent a forced mate
+                # Avoid Stalemate and giving opponent a mate
                 if is_stalemate or opp_can_mate:
                     continue 
-                
+                    
                 is_attacked = board.is_attacked_by(opponent_color, move.to_square)
                 
                 if not is_attacked:
@@ -85,6 +91,10 @@ class TransformerPlayer(Player):
                         safe_moves.append(move)                
             
             candidate_moves = safe_moves if len(safe_moves) > 0 else legal_moves
+
+            # 【优化2新增】：效率短路机制，如果只有1步安全棋，直接走，无需耗费显卡算力
+            if len(candidate_moves) == 1:
+                return candidate_moves[0].uci()
 
             # Pawn Promotion
             for move in candidate_moves:
@@ -119,7 +129,6 @@ class TransformerPlayer(Player):
             )  
             with torch.no_grad():
                 for move in candidate_moves:
-                    # if thinking time is almost up, force an interruption
                     if time.time() - start_time > self.max_think_time:
                         break
                         
@@ -127,7 +136,8 @@ class TransformerPlayer(Player):
                     text = f"{prompt}{move_uci}"
                     inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
                     outputs = self.model(**inputs, labels=inputs["input_ids"])
-                    # fix length bias of large models
+                    
+                    # 现有的数学逻辑（乘以 seq_len）已经足够客观正确地消除了长度偏差
                     seq_len = inputs["input_ids"].size(1)
                     score = -(outputs.loss.item() * seq_len)
                     
@@ -142,8 +152,4 @@ class TransformerPlayer(Player):
                 
         except Exception as e:
             # Second layer of defense
-            return random.choice(legal_moves).uci()
-                
-        except Exception as e:
-            # Second layer of defense: if it is a tactical calculation or model reports an error, randomly take legal steps
             return random.choice(legal_moves).uci()
