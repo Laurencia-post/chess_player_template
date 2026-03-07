@@ -1,6 +1,6 @@
 import torch
 import chess
-import random
+import random  # added for emergency fallback
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from chess_tournament import Player
 from typing import Optional
@@ -8,9 +8,8 @@ from typing import Optional
 class TransformerPlayer(Player):
     def __init__(self, name: str = "Laurencia"):
         super().__init__(name)
-        # check GPU or CPU
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
+        # check GPU or Cpu
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"   
         # use model to test
         self.model_id = "Qwen/Qwen2.5-0.5B"
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
@@ -28,7 +27,15 @@ class TransformerPlayer(Player):
         # if already been killed and have no legal steps left, return None
         if not legal_moves:
             return None
-            
+
+        # if there is a move that can directly kill the opponent, make that move
+        for move in legal_moves:
+            board.push(move)           
+            is_mate = board.is_checkmate()
+            board.pop() 
+            if is_mate:
+                return move.uci()
+
         # wrap the entire prediction process in try-except to prevent runtime crashes
         try:
             best_move = None
@@ -63,5 +70,5 @@ class TransformerPlayer(Player):
                 return random.choice(legal_moves).uci()
                 
         except Exception as e:
-            # bulletproof fallback: if anything goes wrong, play a random valid move
+            # bulletproof fallback: if anything goes wrong (e.g. OutOfMemory), play a random valid move
             return random.choice(legal_moves).uci()
