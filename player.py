@@ -10,7 +10,7 @@ class TransformerPlayer(Player):
         super().__init__(name)
         # check GPU or Cpu
         self.device = "cuda" if torch.cuda.is_available() else "cpu"  
-        # use model to test
+        # use Qwen2.5-0.5B, loaded in float16 for faster inference & memory efficiency
         self.model_id = "Qwen/Qwen2.5-0.5B"
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -18,57 +18,84 @@ class TransformerPlayer(Player):
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
         ).to(self.device)
         self.model.eval()
+        # piece values for evaluating captures
+        self.piece_values = {
+            chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, 
+            chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0
+        }
 
     def get_move(self, fen: str) -> Optional[str]:
         # read current chessboard state
         board = chess.Board(fen)
-        legal_moves = list(board.legal_moves) 
-        # if already been killed and have no legal steps left, return None
+        legal_moves = list(board.legal_moves)   
+        # if no legal steps left, return None
         if not legal_moves:
             return None
-
+            
         # Filter 1: win immediately if possible
         for move in legal_moves:
             board.push(move)
-            is_mate = board.is_checkmate)aa
+            is_mate = board.is_checkmate()
             board.pop()
             if is_mate:
                 return move.uci()
                 
-        # Filter 2: avoid moving into squares attacked by the opponent
+        # Filter 2: avoid moving into attacked squares
         opponent_color = not board.turn
         safe_moves = []
         for move in legal_moves:
-            # a move is safe if it is a capture itself, or if the destination square is not attacked
+            # safe if it is a capture, or if destination is not attacked
             if board.is_capture(move) or not board.is_attacked_by(opponent_color, move.to_square):
                 safe_moves.append(move)             
-        # if danger filter removes all moves, fall back to all legal moves
+        
         candidate_moves = safe_moves if len(safe_moves) > 0 else legal_moves
 
-        # wrap the entire prediction process in try-except to prevent runtime crashes
+        # Filter 3: if we can safely eat a high-value piece, do it
+        best_capture_val = 0
+        best_capture_move = None
+        for move in candidate_moves:
+            if board.is_capture(move):
+                if board.is_en_passant(move):
+                    val = 1
+                else:
+                    captured_piece = board.piece_at(move.to_square)
+                    val = self.piece_values.get(captured_piece.piece_type, 0) if captured_piece else 0
+                
+                if val > best_capture_val:
+                    best_capture_val = val
+                    best_capture_move = move
+                    
+        if best_capture_move and best_capture_val > 0:
+            return best_capture_move.uci()
+
+        # wrap the LLM prediction in try-except to prevent runtime crashes
         try:
             best_move = None
             best_score = -float('inf')
-            # tell model what the current chessboard looks like
+            
+            # grandmaster prompt to guide the LLM
             prompt = (
                 "You are a Grandmaster chess engine. "
                 f"Analyze this board position in FEN: {fen}\n"
                 "What is the single best and winning UCI move? "
                 "The best move is: "
             ) 
-            # let model rate only the safe candidate moves and select
+            
+            # let LLM rate only the filtered candidate moves
             with torch.no_grad():
-                for move in candidate_moves: # only evaluate filtered candidate_moves now
+                for move in candidate_moves:
                     move_uci = move.uci()
                     text = f"{prompt}{move_uci}"
                     inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
                     
+                    # calculate cross-entropy loss (lower loss = higher probability)
                     outputs = self.model(**inputs, labels=inputs["input_ids"])
-                    score = -outputs.loss.item() # the smaller the loss, the better
+                    score = -outputs.loss.item() 
                     
                     if score > best_score:
                         best_score = score
                         best_move = move_uci
+                        
             # double check if a valid move is found
             if best_move is not None:
                 return best_move
