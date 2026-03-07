@@ -7,7 +7,7 @@ from chess_tournament import Player
 from typing import Optional
 
 class TransformerPlayer(Player):
-    def __init__(self, name: str = "Laurencia_Ultra"):
+    def __init__(self, name: str = "Laurencia_GodMode"):
         super().__init__(name)
         # check GPU or CPU
         self.device = "cuda" if torch.cuda.is_available() else "cpu"  
@@ -30,12 +30,11 @@ class TransformerPlayer(Player):
     def get_move(self, fen: str) -> Optional[str]:
         start_time = time.time()
         
-        # First layer of defense，prevent receiving damaged FEN strings from causing a crash
+        # First layer of defense, prevent receiving damaged FEN strings from causing a crash
         try:
             board = chess.Board(fen)
             legal_moves = list(board.legal_moves)   
         except ValueError:
-            # 如果老师传入的 FEN 是坏的，直接安全返回 None
             return None
             
         if not legal_moves:
@@ -51,17 +50,23 @@ class TransformerPlayer(Player):
                 if is_mate:
                     return move.uci()
                     
-            # Filter 2: avoid moving into attacked squares, avoid BAD trades, and avoid STALEMATE
+            # Filter 2: avoid attacked squares, BAD trades, STALEMATE, and OPPONENT MATE
             opponent_color = not board.turn
             safe_moves = []
             for move in legal_moves:
                 board.push(move)
                 is_stalemate = board.is_stalemate()
+                
+                # Opponent Mate Sniffer
+                # If I make this move, can opponent checkmate me immediately on the next turn?
+                opp_can_mate = any(board.is_checkmate() for opp_move in board.legal_moves)
+                
                 board.pop()
                 
-                # Avoid Stalemate
-                if is_stalemate:
+                # avoid Stalemate and avoid giving the opponent a forced mate
+                if is_stalemate or opp_can_mate:
                     continue 
+                
                 is_attacked = board.is_attacked_by(opponent_color, move.to_square)
                 
                 if not is_attacked:
@@ -78,6 +83,7 @@ class TransformerPlayer(Player):
                     # only when pieces eaten are greater than or equal to our pieces can it be considered a safe move
                     if victim_val >= attacker_val:
                         safe_moves.append(move)                
+            
             candidate_moves = safe_moves if len(safe_moves) > 0 else legal_moves
 
             # Pawn Promotion
@@ -113,7 +119,7 @@ class TransformerPlayer(Player):
             )  
             with torch.no_grad():
                 for move in candidate_moves:
-                    # if thinking time is almost up, force an interruption and return to the best result at present
+                    # if thinking time is almost up, force an interruption
                     if time.time() - start_time > self.max_think_time:
                         break
                         
@@ -133,6 +139,10 @@ class TransformerPlayer(Player):
                 return best_move
             else:
                 return random.choice(candidate_moves).uci()
+                
+        except Exception as e:
+            # Second layer of defense
+            return random.choice(legal_moves).uci()
                 
         except Exception as e:
             # Second layer of defense: if it is a tactical calculation or model reports an error, randomly take legal steps
