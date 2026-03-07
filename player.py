@@ -35,6 +35,7 @@ class TransformerPlayer(Player):
             legal_moves = list(board.legal_moves)   
         except ValueError:
             return None  
+            
         if not legal_moves:
             return None
             
@@ -54,6 +55,7 @@ class TransformerPlayer(Player):
             for move in legal_moves:
                 board.push(move)
                 is_stalemate = board.is_stalemate()
+                
                 # Opponent Mate Sniffer
                 opp_can_mate = False
                 for opp_move in board.legal_moves:
@@ -64,9 +66,11 @@ class TransformerPlayer(Player):
                         break
                     board.pop()
                 board.pop()
+                
                 # Avoid Stalemate and giving opponent a mate
                 if is_stalemate or opp_can_mate:
                     continue     
+                    
                 is_attacked = board.is_attacked_by(opponent_color, move.to_square)
                 if not is_attacked:
                     safe_moves.append(move)
@@ -82,40 +86,54 @@ class TransformerPlayer(Player):
                     # only when pieces eaten are greater than or equal to our pieces can it be considered a safe move
                     if victim_val >= attacker_val:
                         safe_moves.append(move)                
+            
             candidate_moves = safe_moves if len(safe_moves) > 0 else legal_moves
-            # efficiency short-circuit mechanism: if there is only one safe move, proceed directly
+            
+            # efficiency short-circuit mechanism
             if len(candidate_moves) == 1:
                 return candidate_moves[0].uci()
+                
             # Pawn Promotion
             for move in candidate_moves:
                 if move.promotion == chess.QUEEN:
                     return move.uci()
 
-            # Filter 3: if we can safely eat a high-value piece, do it
+            # Filter 3: ONLY auto-capture if it is STRICTLY PROFITABLE (Free piece or gaining value)
             best_capture_val = 0
             best_capture_move = None
             for move in candidate_moves:
                 if board.is_capture(move):
-                    if board.is_en_passant(move):
-                        val = 1
-                    else:
-                        captured_piece = board.piece_at(move.to_square)
-                        val = self.piece_values.get(captured_piece.piece_type, 0) if captured_piece else 0   
-                    if val > best_capture_val:
-                        best_capture_val = val
-                        best_capture_move = move           
+                    attacker_piece = board.piece_at(move.from_square)
+                    victim_piece = board.piece_at(move.to_square)
+                    att_val = self.piece_values.get(attacker_piece.piece_type, 0) if attacker_piece else 0
+                    vic_val = 1 if board.is_en_passant(move) else (self.piece_values.get(victim_piece.piece_type, 0) if victim_piece else 0)
+                    
+                    is_attacked = board.is_attacked_by(opponent_color, move.to_square)
+                    
+                    # only when it is taken for free (without being attacked) or for a small gain (by taking high-value pieces) will it be directly executed
+                    is_profitable = (not is_attacked) or (vic_val > att_val)
+                    
+                    if is_profitable and vic_val > best_capture_val:
+                        best_capture_val = vic_val
+                        best_capture_move = move            
+            
             if best_capture_move and best_capture_val > 0:
                 return best_capture_move.uci()
 
             # LLM prediction
             best_move = None
             best_score = -float('inf')        
+            
+            # prompt
+            candidate_str = ", ".join([m.uci() for m in candidate_moves])
             prompt = (
                 "You are a Grandmaster chess engine. "
                 f"Analyze this board position in FEN: {fen}\n"
+                f"The safe candidate moves are: {candidate_str}\n"
                 "What is the single best and winning UCI move? "
                 "The best move is: "
             )  
+            
             with torch.no_grad():
                 for move in candidate_moves:
                     if time.time() - start_time > self.max_think_time:
@@ -125,11 +143,14 @@ class TransformerPlayer(Player):
                     text = f"{prompt}{move_uci}"
                     inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
                     outputs = self.model(**inputs, labels=inputs["input_ids"])
+                    
                     seq_len = inputs["input_ids"].size(1)
                     score = -(outputs.loss.item() * seq_len)
+                    
                     if score > best_score:
                         best_score = score
                         best_move = move_uci        
+                        
             if best_move is not None:
                 return best_move
             else:
