@@ -29,14 +29,12 @@ class TransformerPlayer(Player):
 
     def get_move(self, fen: str) -> Optional[str]:
         start_time = time.time()
-        
         # First layer of defense
         try:
             board = chess.Board(fen)
             legal_moves = list(board.legal_moves)   
         except ValueError:
-            return None
-            
+            return None  
         if not legal_moves:
             return None
             
@@ -56,8 +54,7 @@ class TransformerPlayer(Player):
             for move in legal_moves:
                 board.push(move)
                 is_stalemate = board.is_stalemate()
-                
-                # 【优化1修复】：正确的 Opponent Mate Sniffer 逻辑
+                # Opponent Mate Sniffer
                 opp_can_mate = False
                 for opp_move in board.legal_moves:
                     board.push(opp_move)
@@ -66,15 +63,11 @@ class TransformerPlayer(Player):
                         board.pop()
                         break
                     board.pop()
-                
                 board.pop()
-                
                 # Avoid Stalemate and giving opponent a mate
                 if is_stalemate or opp_can_mate:
-                    continue 
-                    
+                    continue     
                 is_attacked = board.is_attacked_by(opponent_color, move.to_square)
-                
                 if not is_attacked:
                     safe_moves.append(move)
                 elif board.is_capture(move):
@@ -89,13 +82,10 @@ class TransformerPlayer(Player):
                     # only when pieces eaten are greater than or equal to our pieces can it be considered a safe move
                     if victim_val >= attacker_val:
                         safe_moves.append(move)                
-            
             candidate_moves = safe_moves if len(safe_moves) > 0 else legal_moves
-
-            # 【优化2新增】：效率短路机制，如果只有1步安全棋，直接走，无需耗费显卡算力
+            # efficiency short-circuit mechanism: if there is only one safe move, proceed directly
             if len(candidate_moves) == 1:
                 return candidate_moves[0].uci()
-
             # Pawn Promotion
             for move in candidate_moves:
                 if move.promotion == chess.QUEEN:
@@ -113,8 +103,7 @@ class TransformerPlayer(Player):
                         val = self.piece_values.get(captured_piece.piece_type, 0) if captured_piece else 0   
                     if val > best_capture_val:
                         best_capture_val = val
-                        best_capture_move = move
-                        
+                        best_capture_move = move           
             if best_capture_move and best_capture_val > 0:
                 return best_capture_move.uci()
 
@@ -136,15 +125,11 @@ class TransformerPlayer(Player):
                     text = f"{prompt}{move_uci}"
                     inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
                     outputs = self.model(**inputs, labels=inputs["input_ids"])
-                    
-                    # 现有的数学逻辑（乘以 seq_len）已经足够客观正确地消除了长度偏差
                     seq_len = inputs["input_ids"].size(1)
                     score = -(outputs.loss.item() * seq_len)
-                    
                     if score > best_score:
                         best_score = score
-                        best_move = move_uci
-                        
+                        best_move = move_uci        
             if best_move is not None:
                 return best_move
             else:
