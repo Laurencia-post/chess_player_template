@@ -10,7 +10,7 @@ class TransformerPlayer(Player):
         super().__init__(name)
         # check GPU or Cpu
         self.device = "cuda" if torch.cuda.is_available() else "cpu"  
-        # use Qwen2.5-0.5B, loaded in float16 for faster inference & memory efficiency
+        # use model to test
         self.model_id = "Qwen/Qwen2.5-0.5B"
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -18,6 +18,7 @@ class TransformerPlayer(Player):
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
         ).to(self.device)
         self.model.eval()
+        
         # piece values for evaluating captures
         self.piece_values = {
             chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, 
@@ -40,13 +41,34 @@ class TransformerPlayer(Player):
             if is_mate:
                 return move.uci()
                 
-        # Filter 2: avoid moving into attacked squares
+        # Filter 2: avoid moving into attacked squares, avoid BAD trades, and avoid STALEMATE (Teacher's Hint)
         opponent_color = not board.turn
         safe_moves = []
         for move in legal_moves:
-            # safe if it is a capture, or if destination is not attacked
-            if board.is_capture(move) or not board.is_attacked_by(opponent_color, move.to_square):
-                safe_moves.append(move)             
+            board.push(move)
+            is_stalemate = board.is_stalemate()
+            board.pop()
+            
+            # Avoid Stalemate
+            if is_stalemate:
+                continue 
+
+            is_attacked = board.is_attacked_by(opponent_color, move.to_square)
+            
+            if not is_attacked:
+                safe_moves.append(move)
+            elif board.is_capture(move):
+                # Avoid Bad Trades
+                attacker_piece = board.piece_at(move.from_square)
+                victim_piece = board.piece_at(move.to_square)
+                attacker_val = self.piece_values.get(attacker_piece.piece_type, 0) if attacker_piece else 0
+                if board.is_en_passant(move):
+                    victim_val = 1
+                else:
+                    victim_val = self.piece_values.get(victim_piece.piece_type, 0) if victim_piece else 0
+                # only when pieces eaten are greater than or equal to our pieces can it be considered a safe move
+                if victim_val >= attacker_val:
+                    safe_moves.append(move)              
         
         candidate_moves = safe_moves if len(safe_moves) > 0 else legal_moves
 
