@@ -7,7 +7,7 @@ from chess_tournament import Player
 from typing import Optional
 
 class TransformerPlayer(Player):
-    def __init__(self, name: str = "Laurencia_Apex"):
+    def __init__(self, name: str = "Laurencia_Final"):
         super().__init__(name)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"  
         self.model_id = "Qwen/Qwen2.5-0.5B"
