@@ -1,14 +1,15 @@
+import time
 import torch
 import chess
-import random  # added for emergency fallback
+import random  
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from chess_tournament import Player
 from typing import Optional
 
 class TransformerPlayer(Player):
-    def __init__(self, name: str = "Laurencia"):
+    def __init__(self, name: str = "Laurencia_Ultra"):
         super().__init__(name)
-        # check GPU or Cpu
+        # check GPU or CPU
         self.device = "cuda" if torch.cuda.is_available() else "cpu"  
         # use model to test
         self.model_id = "Qwen/Qwen2.5-0.5B"
@@ -17,19 +18,19 @@ class TransformerPlayer(Player):
             self.model_id,
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
         ).to(self.device)
-        self.model.eval()
-        
+        self.model.eval() 
         # piece values for evaluating captures
         self.piece_values = {
             chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, 
             chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0
         }
+        # set an upper limit on thinking time to prevent being judged as losing due to exceeding the time limit
+        self.max_think_time = 7.5  
 
     def get_move(self, fen: str) -> Optional[str]:
-        # read current chessboard state
+        start_time = time.time()
         board = chess.Board(fen)
         legal_moves = list(board.legal_moves)   
-        # if no legal steps left, return None
         if not legal_moves:
             return None
             
@@ -41,7 +42,7 @@ class TransformerPlayer(Player):
             if is_mate:
                 return move.uci()
                 
-        # Filter 2: avoid moving into attacked squares, avoid BAD trades, and avoid STALEMATE (Teacher's Hint)
+        # Filter 2: avoid moving into attacked squares, avoid BAD trades, and avoid STALEMATE
         opponent_color = not board.turn
         safe_moves = []
         for move in legal_moves:
@@ -52,7 +53,6 @@ class TransformerPlayer(Player):
             # Avoid Stalemate
             if is_stalemate:
                 continue 
-
             is_attacked = board.is_attacked_by(opponent_color, move.to_square)
             
             if not is_attacked:
@@ -65,12 +65,16 @@ class TransformerPlayer(Player):
                 if board.is_en_passant(move):
                     victim_val = 1
                 else:
-                    victim_val = self.piece_values.get(victim_piece.piece_type, 0) if victim_piece else 0
+                    victim_val = self.piece_values.get(victim_piece.piece_type, 0) if victim_piece else 0    
                 # only when pieces eaten are greater than or equal to our pieces can it be considered a safe move
                 if victim_val >= attacker_val:
-                    safe_moves.append(move)              
-        
+                    safe_moves.append(move)                
         candidate_moves = safe_moves if len(safe_moves) > 0 else legal_moves
+
+        # Pawn Promotion
+        for move in candidate_moves:
+            if move.promotion == chess.QUEEN:
+                return move.uci()
 
         # Filter 3: if we can safely eat a high-value piece, do it
         best_capture_val = 0
@@ -81,49 +85,45 @@ class TransformerPlayer(Player):
                     val = 1
                 else:
                     captured_piece = board.piece_at(move.to_square)
-                    val = self.piece_values.get(captured_piece.piece_type, 0) if captured_piece else 0
-                
+                    val = self.piece_values.get(captured_piece.piece_type, 0) if captured_piece else 0   
                 if val > best_capture_val:
                     best_capture_val = val
                     best_capture_move = move
                     
         if best_capture_move and best_capture_val > 0:
             return best_capture_move.uci()
-
-        # wrap the LLM prediction in try-except to prevent runtime crashes
+        #  wrap the LLM prediction in try-except to prevent runtime crashes
         try:
             best_move = None
-            best_score = -float('inf')
-            
-            # grandmaster prompt to guide the LLM
+            best_score = -float('inf')        
             prompt = (
                 "You are a Grandmaster chess engine. "
                 f"Analyze this board position in FEN: {fen}\n"
                 "What is the single best and winning UCI move? "
                 "The best move is: "
-            ) 
-            
-            # let LLM rate only the filtered candidate moves
+            )  
             with torch.no_grad():
                 for move in candidate_moves:
+                    # if thinking time is almost up, force an interruption and return to the best result at present
+                    if time.time() - start_time > self.max_think_time:
+                        break
+                        
                     move_uci = move.uci()
                     text = f"{prompt}{move_uci}"
                     inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-                    
-                    # calculate cross-entropy loss (lower loss = higher probability)
                     outputs = self.model(**inputs, labels=inputs["input_ids"])
-                    score = -outputs.loss.item() 
+                   # fix length bias of large models, multiply by sequence length and calculate true total probability score
+                    seq_len = inputs["input_ids"].size(1)
+                    score = -(outputs.loss.item() * seq_len)
                     
                     if score > best_score:
                         best_score = score
                         best_move = move_uci
                         
-            # double check if a valid move is found
             if best_move is not None:
                 return best_move
             else:
                 return random.choice(candidate_moves).uci()
                 
         except Exception as e:
-            # bulletproof fallback: if anything goes wrong, play a random safe move
             return random.choice(candidate_moves).uci()
